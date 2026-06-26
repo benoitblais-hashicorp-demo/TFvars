@@ -2,15 +2,16 @@
 
 ## 1. Purpose
 
-Define implementation requirements for a Terraform repository that demonstrates GitFlow using environment-scoped tfvars files.
+Define implementation requirements for a Terraform repository that demonstrates a feature-branch workflow using environment-scoped tfvars files.
 
-This specification is the source of truth for branch behavior, tfvars organization, workspace targeting, and acceptance criteria.
+This specification is the source of truth for branch behavior, tfvars organization, workspace targeting, Terraform run dispatch, and acceptance criteria.
 
 ## 2. Scope
 
 ### 2.1 In Scope
 
-- GitFlow branch model with three long-lived branches.
+- Feature-branch workflow with a single long-lived main branch.
+- Manual Terraform run dispatch targeting a selected environment.
 - Environment-specific tfvars organization.
 - Workspace configuration that targets one explicit tfvars file.
 - Documentation and process rules that keep branch promotion predictable.
@@ -21,19 +22,19 @@ This specification is the source of truth for branch behavior, tfvars organizati
 - Advanced deployment orchestration outside standard Terraform workflows.
 - Secret management product comparisons or migration tracks.
 
-## 3. Branch Model and Promotion
+## 3. Branch Model and Run Trigger
 
-The repository uses these long-lived branches:
+The repository uses a single long-lived branch:
 
-- main: production-ready state.
-- dev: integration branch for active development.
-- test: validation branch between dev and main.
+- main: always production-ready.
 
-Required promotion path:
+All changes are developed on short-lived feature branches (`feature/*`) and merged into main via pull request.
 
-- dev -> test -> main
+Merging to main does **not** trigger a Terraform run.
 
-Direct promotion from dev to main is not allowed unless explicitly approved by maintainers.
+Terraform runs are triggered manually via the `Terraform Dispatch` workflow (`workflow_dispatch`). The workflow presents a dropdown to select the target environment (dev, test, or prod). The selected environment maps directly to `environment/{env}/app.tfvars`.
+
+Direct commits to main are not allowed.
 
 ## 4. Environment tfvars Structure
 
@@ -88,13 +89,17 @@ Documentation files:
 
 ## 7. Functional Requirements
 
-### FR-1 Branch Promotion
+### FR-1 Feature Branch Workflow
 
-Contributors can promote configuration changes through dev, then test, then main.
+All changes are made on a `feature/*` branch and merged into main via pull request. No long-lived environment branches exist.
 
 ### FR-2 Environment Isolation
 
 Each environment has its own tfvars subfolder and no cross-environment leakage.
+
+### FR-2b Manual Run Dispatch
+
+Terraform runs are triggered exclusively via `workflow_dispatch`. The selected environment input determines the tfvars file used at runtime. Runs are never triggered automatically on push or merge.
 
 ### FR-3 Deterministic Workspace Input
 
@@ -115,7 +120,7 @@ The root module includes a `random_integer` resource defined in `main.tf` to dem
 ## 8. Security Requirements
 
 - Never commit secrets in tfvars files.
-- Use secure workspace variables or a secret backend for credentials.
+- The HCP Terraform API token must be stored as a GitHub secret named `TFE_TOKEN`. Do not use Vault or any other secrets backend for this repository.
 - Mark sensitive Terraform inputs with sensitive = true where applicable.
 - Do not commit .terraform folders or tfstate artifacts.
 
@@ -129,7 +134,7 @@ The root module includes a `random_integer` resource defined in `main.tf` to dem
 
 ### AC-1 Branch Policy
 
-Documentation and process enforce dev -> test -> main as default promotion flow.
+Documentation and process enforce `feature/* -> main` as the default flow. No long-lived environment branches exist. Merging to main never triggers a Terraform run.
 
 ### AC-2 tfvars Layout
 
@@ -150,9 +155,9 @@ AGENTS.md, CONTRIBUTING.md, and this specification describe the same GitFlow tfv
 ## 11. Risks and Mitigations
 
 - Risk: tfvars drift across environments.
-  - Mitigation: isolate by folder and review promotions through pull requests.
-- Risk: accidental promotion bypass.
-  - Mitigation: enforce branch flow and branch protection where available.
+  - Mitigation: isolate by folder and review changes through pull requests.
+- Risk: accidental Terraform run against wrong environment.
+  - Mitigation: environment is an explicit required input in the dispatch workflow; no automatic triggers.
 - Risk: ambiguous runtime variable selection.
   - Mitigation: require one explicit workspace tfvars target path.
 

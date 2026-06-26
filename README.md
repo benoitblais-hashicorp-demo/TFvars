@@ -1,6 +1,3 @@
-# TFvars
-Repository to run demo with HCP Terraform Workspace API-Driven using tfvars.
-
 <!-- BEGIN_TF_DOCS -->
 # Feature Branch Workflow with HCP Terraform using .tfvars
 

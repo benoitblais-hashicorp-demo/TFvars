@@ -1,0 +1,286 @@
+# This workflow is triggered manually via workflow_dispatch.
+#
+# It allows you to select the target environment and triggers an API-driven run
+# in HCP Terraform against the corresponding workspace. The HCP Terraform API
+# token is read from the TFE_TOKEN GitHub secret.
+# Run summary, plan output, and cost estimation are written to the job summary.
+#
+# Workspace naming convention: <repository-name>-<environment>
+# Example: TFvars-dev, TFvars-test, TFvars-prod
+#
+# Documentation
+# - https://docs.github.com/en/actions/using-workflows/manually-running-a-workflow
+# - https://github.com/hashicorp/tfc-workflows-github/tree/main/actions/upload-configuration
+# - https://github.com/hashicorp/tfc-workflows-github/tree/main/actions/create-run
+# - https://github.com/hashicorp/tfc-workflows-github/tree/main/actions/plan-output
+#
+# Prerequisites
+# - An HCP Terraform workspace per environment (<repository-name>-<environment>)
+# - GitHub secret: TFE_TOKEN (HCP Terraform user or team API token)
+#
+
+name: Terraform Dispatch
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  hcp-terraform-apply-run:
+    name: HCP Terraform Apply Run (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TF_API_TOKEN: ${{ secrets.TFE_TOKEN }}
+      TF_CLOUD_ORGANIZATION: "benoitblais-hashicorp"
+      TF_WORKSPACE: ${{ github.event.repository.name }}-${{ inputs.environment }}
+      CONFIG_DIRECTORY: "./"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Upload Configuration
+        uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.3.2
+        id: upload
+        with:
+          workspace: ${{ env.TF_WORKSPACE }}
+          directory: ${{ env.CONFIG_DIRECTORY }}
+
+      - name: Create Run
+        uses: hashicorp/tfc-workflows-github/actions/create-run@v1.3.2
+        id: create-run
+        continue-on-error: true
+        with:
+          workspace: ${{ env.TF_WORKSPACE }}
+          configuration_version: ${{ steps.upload.outputs.configuration_version_id }}
+
+      - name: Plan Output
+        uses: hashicorp/tfc-workflows-github/actions/plan-output@v1.3.2
+        id: plan-output
+        with:
+          plan: ${{ steps.create-run.outputs.plan_id }}
+
+      - name: 1. Run Summary
+        uses: actions/github-script@v7
+        env:
+          TF_API_TOKEN: ${{ env.TF_API_TOKEN }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            function logMsg(level, details, extra) {
+              const date = new Date().toISOString().replace('T', ' ').substring(0, 19);
+              const paddedLevel = level.padEnd(7, ' ');
+              console.log(`${date} | ${paddedLevel} | ${details}`);
+              if (extra) console.log(extra);
+            }
+            const runId = '${{ steps.create-run.outputs.run_id }}';
+            const runLink = '${{ steps.create-run.outputs.run_link }}';
+            const planAdd = '${{ steps.plan-output.outputs.add }}' || '0';
+            const planChange = '${{ steps.plan-output.outputs.change }}' || '0';
+            const planDestroy = '${{ steps.plan-output.outputs.destroy }}' || '0';
+            const planImport = '${{ steps.plan-output.outputs.import }}' || '0';
+            const environment = '${{ inputs.environment }}';
+            const workspace = '${{ env.TF_WORKSPACE }}';
+            const fetch = globalThis.fetch;
+            logMsg('INFO', `Fetching run details for Run ID: ${runId}`);
+            const res = await fetch(`https://app.terraform.io/api/v2/runs/${runId}`, {
+              headers: {
+                'Authorization': `Bearer ${process.env.TF_API_TOKEN}`,
+                'Content-Type': 'application/vnd.api+json'
+              }
+            });
+            const data = await res.json();
+            let runStatus = 'Unknown';
+            let executionMode = 'Unknown';
+            let configVersion = 'Unknown';
+            let runSource = 'Unknown';
+            let durationStr = 'N/A';
+            let policyChecksStr = 'N/A';
+            if (data && data.data && data.data.attributes) {
+              runStatus = data.data.attributes.status || runStatus;
+              runStatus = runStatus.replace(/_/g, ' ');
+              executionMode = data.data.attributes['execution-mode'] || executionMode;
+              runSource = data.data.attributes.source || runSource;
+              if (data.data.relationships && data.data.relationships['configuration-version']) {
+                configVersion = data.data.relationships['configuration-version'].data.id;
+              }
+              const timestamps = data.data.attributes['status-timestamps'];
+              if (timestamps && timestamps['applied-at'] && timestamps['apply-queueable-at']) {
+                const end = new Date(timestamps['applied-at']);
+                const start = new Date(timestamps['apply-queueable-at']);
+                const diffSecs = Math.round((end - start) / 1000);
+                durationStr = `${diffSecs}s`;
+              }
+              const policyStatus = data.data.relationships['policy-checks']?.data;
+              policyChecksStr = (policyStatus && policyStatus.length > 0) ? 'Passed' : 'None';
+            }
+            const output = `# Summary - ${runStatus}
+            | Environment | Workspace | Policy checks | Plan duration | Resources changed |
+            |:---:|:---:|:---:|:---:|:---:|
+            | **${environment}** | **${workspace}** | **${policyChecksStr}** | **${durationStr}** | i${planImport} +${planAdd} ~${planChange} -${planDestroy} |
+            [View in HCP Terraform](${runLink})
+            <details><summary>Run Details</summary>
+            - **Run ID:** \`${runId}\`
+            - **Configuration:** \`${configVersion}\`
+            - **Trigger:** \`${runSource}\`
+            - **Execution mode:** \`${executionMode}\`
+            </details>
+            `;
+            await core.summary.addRaw(output).write();
+            logMsg('INFO', 'Run summary written to job summary');
+
+      - name: 2. Plan Output
+        uses: actions/github-script@v7
+        env:
+          TF_API_TOKEN: ${{ env.TF_API_TOKEN }}
+          TF_CLOUD_ORGANIZATION: ${{ env.TF_CLOUD_ORGANIZATION }}
+          TF_WORKSPACE: ${{ env.TF_WORKSPACE }}
+          PLAN_ID: ${{ steps.create-run.outputs.plan_id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            function logMsg(level, details, extra) {
+              const date = new Date().toISOString().replace('T', ' ').substring(0, 19);
+              const paddedLevel = level.padEnd(7, ' ');
+              console.log(`${date} | ${paddedLevel} | ${details}`);
+              if (extra) console.log(extra);
+            }
+            const org = process.env.TF_CLOUD_ORGANIZATION;
+            const workspace = process.env.TF_WORKSPACE;
+            const planId = process.env.PLAN_ID;
+            const fetch = globalThis.fetch;
+            logMsg('INFO', `Fetching workspace details for ${workspace}`);
+            const wsRes = await fetch(`https://app.terraform.io/api/v2/organizations/${org}/workspaces/${workspace}`, {
+              headers: {
+                'Authorization': `Bearer ${process.env.TF_API_TOKEN}`,
+                'Content-Type': 'application/vnd.api+json'
+              }
+            });
+            const wsData = await wsRes.json();
+            const isStructured = wsData?.data?.attributes?.['structured-run-output-enabled'];
+            let planOutputText = "";
+            if (isStructured) {
+              logMsg('INFO', 'Workspace is configured with Structured Run Output');
+              planOutputText = "The workspace is configured with Structured Run Output. The plan cannot be displayed as plain text in this summary.";
+            } else if (planId) {
+              logMsg('INFO', `Fetching plan details for plan ID: ${planId}`);
+              const planRes = await fetch(`https://app.terraform.io/api/v2/plans/${planId}`, {
+                headers: {
+                  'Authorization': `Bearer ${process.env.TF_API_TOKEN}`,
+                  'Content-Type': 'application/vnd.api+json'
+                }
+              });
+              const planData = await planRes.json();
+              const logReadUrl = planData?.data?.attributes?.['log-read-url'];
+              if (logReadUrl) {
+                logMsg('INFO', `Fetching raw plan log from log-read-url`);
+                const logRes = await fetch(logReadUrl);
+                const logText = await logRes.text();
+                let cleanLog = logText.replace(/\x1b\[[0-9;]*m/g, '');
+                if (cleanLog.length > 60000) {
+                  logMsg('WARNING', 'Plan log exceeds 60000 chars, truncating top output');
+                  cleanLog = "... (truncated due to size limits)\n" + cleanLog.slice(-60000);
+                }
+                cleanLog = cleanLog.replace(/^([ \t]*)([-+~])/gm, '$2$1');
+                cleanLog = cleanLog.replace(/~/g, '!');
+                planOutputText = `\`\`\`diff\n${cleanLog}\n\`\`\``;
+              } else {
+                logMsg('WARNING', 'Plan log-read-url not available');
+                planOutputText = "Plan log not available.";
+              }
+            } else {
+              logMsg('ERROR', 'PLAN_ID not provided');
+              planOutputText = "Plan ID not provided.";
+            }
+            const planAdd = '${{ steps.plan-output.outputs.add }}' || '0';
+            const planChange = '${{ steps.plan-output.outputs.change }}' || '0';
+            const planDestroy = '${{ steps.plan-output.outputs.destroy }}' || '0';
+            const planImport = '${{ steps.plan-output.outputs.import }}' || '0';
+            const output = `# Terraform Plan Output\n\n**Resources:** ${planAdd} to add, ${planChange} to change, ${planDestroy} to destroy, ${planImport} to import\n\n<details><summary>View Plan</summary>\n\n${planOutputText}\n\n</details>`;
+            await core.summary.addRaw(output).write();
+            logMsg('INFO', 'Plan output written to job summary');
+
+      - name: 3. Cost Estimation
+        uses: actions/github-script@v7
+        env:
+          TF_API_TOKEN: ${{ env.TF_API_TOKEN }}
+          RUN_ID: ${{ steps.create-run.outputs.run_id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            function logMsg(level, details, extra) {
+              const date = new Date().toISOString().replace('T', ' ').substring(0, 19);
+              const paddedLevel = level.padEnd(7, ' ');
+              console.log(`${date} | ${paddedLevel} | ${details}`);
+              if (extra) console.log(extra);
+            }
+            const runId = process.env.RUN_ID;
+            const fetch = globalThis.fetch;
+            let matchedResources = 0;
+            let totalResources = 0;
+            let proposedCost = "0.0";
+            let deltaCost = "0.0";
+            let isAvailable = false;
+            logMsg('INFO', `Fetching run details for Run ID: ${runId}`);
+            const runRes = await fetch(`https://app.terraform.io/api/v2/runs/${runId}`, {
+              headers: {
+                'Authorization': `Bearer ${process.env.TF_API_TOKEN}`,
+                'Content-Type': 'application/vnd.api+json'
+              }
+            });
+            const runData = await runRes.json();
+            const ceId = runData?.data?.relationships?.['cost-estimate']?.data?.id;
+            if (ceId) {
+              logMsg('INFO', `Fetching cost estimate details for ID: ${ceId}`);
+              const ceRes = await fetch(`https://app.terraform.io/api/v2/cost-estimates/${ceId}`, {
+                headers: {
+                  'Authorization': `Bearer ${process.env.TF_API_TOKEN}`,
+                  'Content-Type': 'application/vnd.api+json'
+                }
+              });
+              const ceData = await ceRes.json();
+              if (ceData && ceData.data && ceData.data.attributes) {
+                isAvailable = true;
+                proposedCost = ceData.data.attributes['proposed-monthly-cost'] || "0.0";
+                deltaCost = ceData.data.attributes['delta-monthly-cost'] || "0.0";
+                matchedResources = ceData.data.attributes['matched-resource-count'] || ceData.data.attributes['matched-resources-count'] || 0;
+                totalResources = ceData.data.attributes['total-resource-count'] || ceData.data.attributes['total-resources-count'] || 0;
+              }
+            } else {
+              logMsg('WARNING', 'No cost estimate ID found for this run');
+            }
+            const parsedDelta = parseFloat(deltaCost);
+            const deltaCostStr = parsedDelta >= 0 ? `+$${parsedDelta.toFixed(2)}` : `-$${Math.abs(parsedDelta).toFixed(2)}`;
+            const proposedCostStr = `$${parseFloat(proposedCost).toFixed(2)}`;
+            let output = `# Cost Estimation Details\n\n**${matchedResources} of ${totalResources}** estimated - **${proposedCostStr}/month** ${deltaCostStr}\n\n`;
+            if (!isAvailable) {
+              output += `> *Note: Cost estimation is not available or not enabled for this workspace. Showing $0.00 estimates.*\n`;
+            }
+            await core.summary.addRaw(output).write();
+            logMsg('INFO', 'Cost estimation written to job summary');
+
+      - name: Check Run Status
+        id: hcp-terraform-check-run-status
+        if: ${{ steps.create-run.outputs.run_status != 'applied' }}
+        run: |
+          echo "HCP Terraform Run Failed or Requires Further Attention"
+          echo "Run Status: '${{ steps.create-run.outputs.run_status }}'"
+          echo "${{ steps.create-run.outputs.run_link }}"
+          exit 1

@@ -32,12 +32,12 @@ All tfvars files must follow this directory model:
 
 ```text
 environment/
-	dev/
-		*.tfvars
-	test/
-		*.tfvars
-	prod/
-		*.tfvars
+  dev/
+    *.tfvars
+  test/
+    *.tfvars
+  prod/
+    *.tfvars
 ```
 
 Rules:

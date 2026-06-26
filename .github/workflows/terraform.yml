@@ -12,9 +12,6 @@
 name: Terraform
 
 on:  # yamllint disable-line rule:truthy
-  push:
-    branches:
-      - '**'
   pull_request: {}
 
 concurrency:

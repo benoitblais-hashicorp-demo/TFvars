@@ -10,9 +10,6 @@
 name: Terraform Docs
 
 on:  # yamllint disable-line rule:truthy
-  push:
-    branches:
-      - '**'
   pull_request: {}
 
 concurrency:

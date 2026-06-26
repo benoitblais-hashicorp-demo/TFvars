@@ -278,9 +278,22 @@ jobs:
 
       - name: Check Run Status
         id: hcp-terraform-check-run-status
-        if: ${{ steps.create-run.outputs.run_status != 'applied' }}
         run: |
-          echo "HCP Terraform Run Failed or Requires Further Attention"
-          echo "Run Status: '${{ steps.create-run.outputs.run_status }}'"
-          echo "${{ steps.create-run.outputs.run_link }}"
-          exit 1
+          STATUS="${{ steps.create-run.outputs.run_status }}"
+          LINK="${{ steps.create-run.outputs.run_link }}"
+          echo "Run Status: '${STATUS}'"
+          echo "Run Link:   ${LINK}"
+
+          # Terminal error states — fail the workflow
+          ERROR_STATES="errored discarded canceled force_canceled policy_soft_failed"
+
+          for error_state in $ERROR_STATES; do
+            if [[ "${STATUS}" == "${error_state}" ]]; then
+              echo "::error::HCP Terraform run ended in a failed state: '${STATUS}'. Review the run at: ${LINK}"
+              exit 1
+            fi
+          done
+
+          echo "Run is in a successful or pending-confirmation state: '${STATUS}'."
+          echo "If the workspace requires manual confirmation, visit the workspace to approve the apply:"
+          echo "${LINK}"
